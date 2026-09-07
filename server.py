@@ -1,6 +1,6 @@
-import asyncio
+import os
 import json
-import requests
+import asyncio
 import websockets
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
@@ -10,47 +10,31 @@ app = FastAPI()
 
 
 # =====================================================
-# MTAPI CONFIGURATION
+# TWELVE DATA CONFIGURATION
 # =====================================================
 
-import os
+TWELVE_DATA_API_KEY = os.getenv("TWELVE_DATA_API_KEY")
 
-MTAPI_URL = "https://mt5.mtapi.io"
-
-LOGIN = os.getenv("MT5_LOGIN")
-PASSWORD = os.getenv("MT5_PASSWORD")
-SERVER = os.getenv("MT5_SERVER")
+TWELVE_DATA_WS_URL = (
+    "wss://ws.twelvedata.com/v1/quotes/price"
+)
 
 
 # =====================================================
-# CONNECT TO MTAPI
+# HEALTH CHECK
 # =====================================================
 
-def connect_mtapi():
-
-    response = requests.get(
-        f"{MTAPI_URL}/ConnectEx",
-        params={
-            "user": LOGIN,
-            "password": PASSWORD,
-            "server": SERVER
-        },
-        timeout=30
-    )
-
-    if response.status_code != 200:
-
-        raise Exception(
-            f"ConnectEx failed: {response.text}"
-        )
-
-    session_id = response.text.strip().strip('"')
-
-    return session_id
+@app.get("/")
+async def root():
+    return {
+        "status": "online",
+        "service": "Twelve Data Live Market Data WebSocket",
+        "websocket": "/ws/tickdata"
+    }
 
 
 # =====================================================
-# YOUR PUBLIC WEBSOCKET
+# PUBLIC WEBSOCKET
 # =====================================================
 
 @app.websocket("/ws/tickdata")
@@ -59,6 +43,8 @@ async def tickdata(websocket: WebSocket):
     await websocket.accept()
 
     print("Client connected")
+
+    twelve_ws = None
 
     try:
 
@@ -86,82 +72,95 @@ async def tickdata(websocket: WebSocket):
         )
 
         # =================================================
-        # CONNECT TO MTAPI
+        # CHECK API KEY
         # =================================================
 
-        session_id = connect_mtapi()
+        if not TWELVE_DATA_API_KEY:
 
-        print(
-            "MTAPI session:",
-            session_id
+            await websocket.send_json({
+                "type": "error",
+                "message": "TWELVE_DATA_API_KEY is not configured"
+            })
+
+            await websocket.close()
+
+            return
+
+        # =================================================
+        # TWELVE DATA WEBSOCKET
+        # =================================================
+
+        twelve_ws_url = (
+            f"{TWELVE_DATA_WS_URL}"
+            f"?apikey={TWELVE_DATA_API_KEY}"
         )
+
+        print("Connecting to Twelve Data...")
+
+        twelve_ws = await websockets.connect(
+            twelve_ws_url,
+            ping_interval=20,
+            ping_timeout=20
+        )
+
+        print("Connected to Twelve Data")
 
         # =================================================
         # SUBSCRIBE TO SYMBOL
         # =================================================
 
-        subscribe_response = requests.get(
-            f"{MTAPI_URL}/Subscribe",
-            params={
-                "id": session_id,
-                "symbol": symbol
-            },
-            timeout=30
+        subscribe_message = {
+            "action": "subscribe",
+            "params": {
+                "symbols": symbol
+            }
+        }
+
+        await twelve_ws.send(
+            json.dumps(subscribe_message)
         )
 
         print(
-            "Subscribe:",
-            subscribe_response.status_code,
-            subscribe_response.text
+            f"Subscribed to Twelve Data symbol: {symbol}"
         )
 
         # =================================================
-        # CONNECT TO MTAPI ONQUOTE
+        # RECEIVE TWELVE DATA EVENTS
         # =================================================
 
-        mtapi_ws_url = (
-            f"wss://mt5.mtapi.io/OnQuote"
-            f"?id={session_id}"
-        )
+        while True:
 
-        async with websockets.connect(
-            mtapi_ws_url
-        ) as mtapi_ws:
+            message = await twelve_ws.recv()
+
+            try:
+
+                data = json.loads(message)
+
+            except json.JSONDecodeError:
+
+                print(
+                    "Invalid JSON from Twelve Data:",
+                    message
+                )
+
+                continue
 
             print(
-                f"Connected to MTAPI OnQuote: {symbol}"
+                "Twelve Data:",
+                data
             )
 
             # =================================================
-            # RECEIVE MTAPI TICKS
+            # PRICE EVENT
             # =================================================
 
-            while True:
+            if data.get("event") == "price":
 
-                message = await mtapi_ws.recv()
+                quote_symbol = data.get("symbol")
 
-                try:
+                price = data.get("price")
 
-                    data = json.loads(message)
-
-                except json.JSONDecodeError:
-
-                    continue
-
-                # Only Quote events
-
-                if data.get("type") != "Quote":
-
-                    continue
-
-                quote = data.get(
-                    "data",
-                    {}
-                )
-
-                quote_symbol = quote.get(
-                    "symbol"
-                )
+                timestamp = data.get("timestamp")
 
                 # Only requested symbol
 
@@ -179,16 +178,45 @@ async def tickdata(websocket: WebSocket):
 
                     "symbol": quote_symbol,
 
-                    "bid": quote.get("bid"),
+                    "price": price,
 
-                    "ask": quote.get("ask"),
+                    "bid": None,
 
-                    "last": quote.get("last"),
+                    "ask": None,
 
-                    "time": quote.get("time"),
+                    "last": price,
 
-                    "timestampUTC":
-                        quote.get("timestampUTC")
+                    "timestamp": timestamp,
+
+                    "source": "twelvedata"
+
+                })
+
+            # =================================================
+            # SUBSCRIBE STATUS
+            # =================================================
+
+            elif data.get("event") == "subscribe-status":
+
+                await websocket.send_json({
+
+                    "type": "subscription",
+
+                    "data": data
+
+                })
+
+            # =================================================
+            # ERROR
+            # =================================================
+
+            elif data.get("event") == "error":
+
+                await websocket.send_json({
+
+                    "type": "error",
+
+                    "message": data
 
                 })
 
@@ -202,7 +230,7 @@ async def tickdata(websocket: WebSocket):
 
         print(
             "WebSocket error:",
-            e
+            repr(e)
         )
 
         try:
@@ -218,10 +246,23 @@ async def tickdata(websocket: WebSocket):
         except Exception:
 
             pass
-@app.get("/")
-async def root():
-    return {
-        "status": "online",
-        "service": "MT5 Live Market Data WebSocket",
-        "websocket": "/ws/tickdata"
-    }
+
+    finally:
+
+        # =================================================
+        # CLOSE TWELVE DATA CONNECTION
+        # =================================================
+
+        if twelve_ws:
+
+            try:
+
+                await twelve_ws.close()
+
+            except Exception:
+
+                pass
+
+        print(
+            "Twelve Data connection closed"
+        )
