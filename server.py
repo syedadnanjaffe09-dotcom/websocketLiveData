@@ -13,11 +13,13 @@ app = FastAPI()
 # MTAPI CONFIGURATION
 # =====================================================
 
+import os
+
 MTAPI_URL = "https://mt5.mtapi.io"
 
-LOGIN = "YOUR_LOGIN"
-PASSWORD = "YOUR_PASSWORD"
-SERVER = "MEXGlobalFinancial-Demo"
+LOGIN = os.getenv("MT5_LOGIN")
+PASSWORD = os.getenv("MT5_PASSWORD")
+SERVER = os.getenv("MT5_SERVER")
 
 
 # =====================================================
