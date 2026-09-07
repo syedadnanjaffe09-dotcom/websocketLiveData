@@ -218,3 +218,10 @@ async def tickdata(websocket: WebSocket):
         except Exception:
 
             pass
+@app.get("/")
+async def root():
+    return {
+        "status": "online",
+        "service": "MT5 Live Market Data WebSocket",
+        "websocket": "/ws/tickdata"
+    }
